@@ -13,12 +13,16 @@ public protocol CodeSignerAPI: Sendable {
     var team: Team { get }
     var keyStore: KeyStore { get }
 
-    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], progress: Progress?) async throws
+    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], progress: Progress?) async throws
 }
 
 public extension CodeSignerAPI {
+    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], progress: Progress?) async throws {
+        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], progress: progress)
+    }
+
     func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile]) async throws {
-        try await signApp(at: appURL, provisioningProfiles: profiles, progress: nil)
+        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], progress: nil)
     }
 }
 
@@ -60,7 +64,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
         self.keyStore = keyStore
     }
 
-    public func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], progress: Progress? = nil) async throws
+    public func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], progress: Progress? = nil) async throws
     {
         debugLog("[SideSign] AppBundleSigner.signApp called")
         verboseLog("[SideSign] URL: \(appURL.path), Profiles: \(profiles.map { "\($0.name) (\($0.bundleIdentifier))" })")
@@ -83,7 +87,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
 
         var entitlementsByURL: [URL: String] = [:]
 
-        func prepare(_ app: AppBundle) throws {
+        func prepare(_ app: AppBundle, injectedEntitlements: [String: any Sendable] = [:]) throws {
             verboseLog("[SideSign] AppBundleSigner.prepare started for: \(app.bundleIdentifier)")
 
             guard let matchedProfile = profile(for: app) else {
@@ -122,6 +126,15 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
                 }
             }
 
+            // Caller-injected entitlements are unioned in after the profile∩binary
+            // filtering: they are written into the binary's signature even when the
+            // provisioning profile does not carry them. Only safe for bundles that
+            // are not validated against their profile at install time (e.g.
+            // LiveContainer guests); callers are responsible for scoping this.
+            for (key, value) in injectedEntitlements {
+                filteredEntitlements[key] = value
+            }
+
             verboseLog("[SideSign] Filtered entitlements for signing: \(filteredEntitlements)")
 
             let plist = try PropertyListSerialization.data(
@@ -144,7 +157,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
         }
 
         do {
-            try prepare(appBundle)
+            try prepare(appBundle, injectedEntitlements: injectedEntitlements)
 
             for ext in appBundle.appExtensions {
                 verboseLog("[SideSign] Found app extension: \(ext.bundleIdentifier) at \(ext.fileURL.path)")
