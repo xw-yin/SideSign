@@ -13,16 +13,20 @@ public protocol CodeSignerAPI: Sendable {
     var team: Team { get }
     var keyStore: KeyStore { get }
 
-    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], progress: Progress?) async throws
+    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], preserveAppEntitlements: Bool, progress: Progress?) async throws
 }
 
 public extension CodeSignerAPI {
+    func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], progress: Progress?) async throws {
+        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: injectedEntitlements, preserveAppEntitlements: false, progress: progress)
+    }
+
     func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], progress: Progress?) async throws {
-        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], progress: progress)
+        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], preserveAppEntitlements: false, progress: progress)
     }
 
     func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile]) async throws {
-        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], progress: nil)
+        try await signApp(at: appURL, provisioningProfiles: profiles, injectedEntitlements: [:], preserveAppEntitlements: false, progress: nil)
     }
 }
 
@@ -64,7 +68,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
         self.keyStore = keyStore
     }
 
-    public func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], progress: Progress? = nil) async throws
+    public func signApp(at appURL: URL, provisioningProfiles profiles: [ProvisioningProfile], injectedEntitlements: [String: any Sendable], preserveAppEntitlements: Bool, progress: Progress? = nil) async throws
     {
         debugLog("[SideSign] AppBundleSigner.signApp called")
         verboseLog("[SideSign] URL: \(appURL.path), Profiles: \(profiles.map { "\($0.name) (\($0.bundleIdentifier))" })")
@@ -87,7 +91,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
 
         var entitlementsByURL: [URL: String] = [:]
 
-        func prepare(_ app: AppBundle, injectedEntitlements: [String: any Sendable] = [:]) throws {
+        func prepare(_ app: AppBundle, injectedEntitlements: [String: any Sendable] = [:], preserveAppEntitlements: Bool = false) throws {
             verboseLog("[SideSign] AppBundleSigner.prepare started for: \(app.bundleIdentifier)")
 
             guard let matchedProfile = profile(for: app) else {
@@ -96,12 +100,27 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
                 throw SignerError.missingProvisioningProfile(bundleIdentifier: app.bundleIdentifier)
             }
 
-            var filteredEntitlements = matchedProfile.entitlements
-            verboseLog("[SideSign] Original profile entitlements: \(filteredEntitlements)")
-
             let applicationEntitlements = app.entitlements
 
-            for (key, _) in filteredEntitlements {
+            var filteredEntitlements: [String: any Sendable]
+            if preserveAppEntitlements {
+                // GetMoreRAM-style patch: the binary's own entitlements are the
+                // base, so keys the provisioning profile never carried survive
+                // the re-sign; identity keys are then re-aligned to the profile
+                // so the resulting signature stays consistent.
+                filteredEntitlements = applicationEntitlements
+                for key in ["application-identifier", "com.apple.developer.team-identifier", "get-task-allow"] {
+                    if let profileValue = matchedProfile.entitlements[key] {
+                        filteredEntitlements[key] = profileValue
+                    }
+                }
+                verboseLog("[SideSign] Preserving app entitlements for: \(app.bundleIdentifier)")
+            } else {
+                filteredEntitlements = matchedProfile.entitlements
+            }
+            verboseLog("[SideSign] Original profile entitlements: \(matchedProfile.entitlements)")
+
+            for (key, _) in filteredEntitlements where !preserveAppEntitlements {
                 if let applicationValue = applicationEntitlements[key] {
                     if key == "keychain-access-groups" {
                         guard let groups = applicationValue as? [String] else {
@@ -157,7 +176,7 @@ public struct AppBundleSigner: CodeSignerAPI, Sendable {
         }
 
         do {
-            try prepare(appBundle, injectedEntitlements: injectedEntitlements)
+            try prepare(appBundle, injectedEntitlements: injectedEntitlements, preserveAppEntitlements: preserveAppEntitlements)
 
             for ext in appBundle.appExtensions {
                 verboseLog("[SideSign] Found app extension: \(ext.bundleIdentifier) at \(ext.fileURL.path)")
