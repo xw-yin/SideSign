@@ -77,7 +77,14 @@ public extension Feature {
 
     static let freeFeatures: Set<Feature> = [
         .appGroups,
-        .interAppAudio
+        .interAppAudio,
+        // SideStore requests these memory features for every app by default.
+        // Whether a free team may actually register them is decided by the
+        // developer portal; callers should drop them and retry if the portal
+        // rejects the App ID update (needs proper testing).
+        .increasedMemoryLimit,
+        .extendedVirtualAddressing,
+        .increasedDebuggingMemoryLimit
     ]
 
     static let paidFeatures: Set<Feature> = [
